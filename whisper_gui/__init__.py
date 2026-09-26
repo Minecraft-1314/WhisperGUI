@@ -1,1 +1,2 @@
 
+"""Whisper GUI application package."""

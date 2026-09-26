@@ -1,10 +1,15 @@
-import os
-import locale
-import tempfile
 import ctypes
 import datetime
+import locale
+import os
+import re
+import shutil
+import subprocess
+import tempfile
 
-from PyQt6.QtGui import QFont, QColor, QPalette
+from PyQt6.QtGui import QColor, QFont, QPalette
+
+from .constants import CUDA_MIN_DRIVER, CUDA_VARIANTS, LARGE_MODEL_MIN_GB
 
 try:
     from darkdetect import isDark as darkdetect_is_dark
@@ -13,49 +18,143 @@ except ImportError:
     darkdetect_is_dark = None
     DARKDETECT = False
 
+WINDOWS_LOCALE_BUFFER_SIZE = 85
+NVIDIA_SMI_TIMEOUT = 15
+
+
 def is_admin():
     try:
-        if os.name == 'nt':
-            return ctypes.windll.shell32.IsUserAnAdmin()
+        if os.name == "nt":
+            return bool(ctypes.windll.shell32.IsUserAnAdmin())
         return os.geteuid() == 0
-    except:
+    except (AttributeError, OSError):
         return False
 
-def get_system_language():
+
+def _windows_locale_name():
+    if os.name != "nt":
+        return None
     try:
-        lang, _ = locale.getdefaultlocale()
-        return "zh" if (lang and lang.startswith("zh")) else "en"
-    except:
-        return "en"
+        kernel32 = ctypes.windll.kernel32
+        buffer = ctypes.create_unicode_buffer(WINDOWS_LOCALE_BUFFER_SIZE)
+        kernel32.GetUserDefaultLocaleName(buffer, WINDOWS_LOCALE_BUFFER_SIZE, None)
+        return buffer.value or None
+    except (AttributeError, OSError, ValueError):
+        return None
+
+
+def _posix_locale_name():
+    for name in ("LC_ALL", "LC_MESSAGES", "LANG"):
+        value = os.environ.get(name)
+        if value and value not in ("C", "POSIX"):
+            return value
+    return None
+
+
+def get_locale_name():
+    name = _windows_locale_name() or _posix_locale_name()
+    if name:
+        return name
+    try:
+        current = locale.getlocale()[0] or ""
+    except (TypeError, ValueError):
+        current = ""
+    return current
+
+
+def get_system_language():
+    tag = get_locale_name().split(".")[0].split("@")[0].replace("-", "_")
+    return "zh" if tag.lower().startswith("zh") else "en"
+
 
 def system_font(point_size=10, bold=False):
-    f = QFont()
-    f.setPointSize(point_size)
-    f.setBold(bold)
-    return f
+    font = QFont()
+    font.setPointSize(point_size)
+    font.setBold(bold)
+    return font
+
 
 DEFAULT_FONT = system_font(10)
 
 _ARROW_DIR = None
 
+ARROW_DARK_SVG = (
+    '<svg xmlns="http://www.w3.org/2000/svg" width="12" height="8" viewBox="0 0 12 8">'
+    '<path d="M1 1 L6 7 L11 1" stroke="#a0a0a0" stroke-width="2" fill="none" '
+    'stroke-linecap="round"/></svg>'
+)
+
+ARROW_LIGHT_SVG = (
+    '<svg xmlns="http://www.w3.org/2000/svg" width="12" height="8" viewBox="0 0 12 8">'
+    '<path d="M1 1 L6 7 L11 1" stroke="#505050" stroke-width="2" fill="none" '
+    'stroke-linecap="round"/></svg>'
+)
+
+
+def _write_icon(path, content):
+    if os.path.isfile(path):
+        return
+    with open(path, "w", encoding="utf-8") as handle:
+        handle.write(content)
+
+
 def ensure_arrow_icons():
     global _ARROW_DIR
     if _ARROW_DIR:
         return _ARROW_DIR
-    tmp = os.path.join(tempfile.gettempdir(), "whisper_gui_icons")
-    os.makedirs(tmp, exist_ok=True)
-    dark = os.path.join(tmp, "arrow_dark.svg")
-    light = os.path.join(tmp, "arrow_light.svg")
-    dark_svg = '<svg xmlns="http://www.w3.org/2000/svg" width="12" height="8" viewBox="0 0 12 8"><path d="M1 1 L6 7 L11 1" stroke="#a0a0a0" stroke-width="2" fill="none" stroke-linecap="round"/></svg>'
-    light_svg = '<svg xmlns="http://www.w3.org/2000/svg" width="12" height="8" viewBox="0 0 12 8"><path d="M1 1 L6 7 L11 1" stroke="#505050" stroke-width="2" fill="none" stroke-linecap="round"/></svg>'
-    if not os.path.isfile(dark):
-        with open(dark, "w", encoding="utf-8") as f:
-            f.write(dark_svg)
-    if not os.path.isfile(light):
-        with open(light, "w", encoding="utf-8") as f:
-            f.write(light_svg)
-    _ARROW_DIR = tmp
-    return tmp
+    target = os.path.join(tempfile.gettempdir(), "whisper_gui_icons")
+    os.makedirs(target, exist_ok=True)
+    _write_icon(os.path.join(target, "arrow_dark.svg"), ARROW_DARK_SVG)
+    _write_icon(os.path.join(target, "arrow_light.svg"), ARROW_LIGHT_SVG)
+    _ARROW_DIR = target
+    return target
+
+
+def _run_hidden(command, timeout):
+    creation_flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+    try:
+        return subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=timeout,
+            creationflags=creation_flags,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+
+def find_ffmpeg():
+    return shutil.which("ffmpeg")
+
+
+def has_ffmpeg():
+    return find_ffmpeg() is not None
+
+
+def detect_driver_version():
+    smi = shutil.which("nvidia-smi")
+    if not smi:
+        return None
+    result = _run_hidden([smi, "--query-gpu=driver_version", "--format=csv,noheader"], NVIDIA_SMI_TIMEOUT)
+    if not result or result.returncode != 0:
+        return None
+    match = re.search(r"(\d+)\.(\d+)", result.stdout or "")
+    if not match:
+        return None
+    return int(match.group(1)), int(match.group(2))
+
+
+def detect_cuda_variants():
+    driver = detect_driver_version()
+    if driver is None:
+        return CUDA_VARIANTS
+    return tuple(
+        variant for variant in CUDA_VARIANTS
+        if CUDA_MIN_DRIVER.get(variant, (0, 0)) <= driver
+    )
 
 
 def dark_stylesheet(arrow_url):
@@ -88,7 +187,8 @@ def dark_stylesheet(arrow_url):
                 QComboBox::drop-down { border:none; width:22px; }
                 QComboBox::down-arrow { image: url("%s"); width:12px; height:8px; }
                 QComboBox QAbstractItemView {
-                    background:#222; border:1px solid #3a3a3a; selection-background-color:#00bcd4;
+                    background:#222; border:1px solid #3a3a3a;
+                    selection-background-color:#00bcd4; selection-color:#ffffff;
                 }
                 QSplitter::handle { background:#2a2a2a; height:4px; }
                 QScrollBar:vertical { background:transparent; width:10px; margin:2px; }
@@ -146,40 +246,78 @@ def light_stylesheet(arrow_url):
 
 
 def dark_palette():
-    pal = QPalette()
-    pal.setColor(QPalette.ColorRole.Window, QColor(18, 18, 18))
-    pal.setColor(QPalette.ColorRole.WindowText, QColor(230, 230, 230))
-    pal.setColor(QPalette.ColorRole.Base, QColor(30, 30, 30))
-    pal.setColor(QPalette.ColorRole.Text, QColor(230, 230, 230))
-    pal.setColor(QPalette.ColorRole.Button, QColor(50, 50, 50))
-    pal.setColor(QPalette.ColorRole.ButtonText, QColor(230, 230, 230))
-    pal.setColor(QPalette.ColorRole.Highlight, QColor(0, 200, 200))
-    return pal
-
+    palette = QPalette()
+    palette.setColor(QPalette.ColorRole.Window, QColor(18, 18, 18))
+    palette.setColor(QPalette.ColorRole.WindowText, QColor(230, 230, 230))
+    palette.setColor(QPalette.ColorRole.Base, QColor(30, 30, 30))
+    palette.setColor(QPalette.ColorRole.Text, QColor(230, 230, 230))
+    palette.setColor(QPalette.ColorRole.Button, QColor(50, 50, 50))
+    palette.setColor(QPalette.ColorRole.ButtonText, QColor(230, 230, 230))
+    palette.setColor(QPalette.ColorRole.Highlight, QColor(0, 200, 200))
+    palette.setColor(QPalette.ColorRole.HighlightedText, QColor(255, 255, 255))
+    return palette
 
 
 class LogStream:
-    def __init__(self, signal):
+    encoding = "utf-8"
+    errors = "replace"
+
+    def __init__(self, signal, wrapped=None):
         self.signal = signal
+        self.wrapped = wrapped
+
     def write(self, message):
-        if message.strip():
-            ts = datetime.datetime.now().strftime("%H:%M:%S")
-            self.signal.emit(f"[{ts}] {message.strip()}")
+        if message and message.strip():
+            timestamp = datetime.datetime.now().strftime("%H:%M:%S")
+            self.signal.emit("[%s] %s" % (timestamp, message.strip()))
+        return len(message) if message else 0
+
+    def writelines(self, lines):
+        for line in lines:
+            self.write(line)
+
     def flush(self):
-        pass
+        if self.wrapped is not None and hasattr(self.wrapped, "flush"):
+            self.wrapped.flush()
+
+    def isatty(self):
+        return False
+
+    def writable(self):
+        return True
+
+    def readable(self):
+        return False
+
+    def seekable(self):
+        return False
+
+    def fileno(self):
+        raise OSError("LogStream has no file descriptor")
+
+    def close(self):
+        self.flush()
+
 
 def detect_gpu():
     try:
         import torch
     except ImportError:
         return False, None, 0
-    if torch.cuda.is_available():
-        name = torch.cuda.get_device_name(0)
-        mem = torch.cuda.get_device_properties(0).total_memory / (1024**3)
-        return True, name, mem
-    if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
-        return True, "Apple MPS", 6
+    try:
+        if torch.cuda.is_available():
+            name = torch.cuda.get_device_name(0)
+            memory = torch.cuda.get_device_properties(0).total_memory / (1024 ** 3)
+            return True, name, memory
+    except (AssertionError, RuntimeError):
+        pass
+    try:
+        if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+            return True, "Apple MPS", 6
+    except (AttributeError, RuntimeError):
+        pass
     return False, None, 0
+
 
 def recommend_model(device, vram_gb):
     if device == "cpu" or vram_gb < 2:
@@ -188,6 +326,6 @@ def recommend_model(device, vram_gb):
         return "base"
     if vram_gb < 6:
         return "small"
-    if vram_gb < 8:
+    if vram_gb < LARGE_MODEL_MIN_GB:
         return "medium"
     return "large"

@@ -1,0 +1,7 @@
+PyQt6>=6.5
+openai-whisper>=20231117
+darkdetect>=0.8.0
+
+# PyTorch is installed by the app itself (CPU or CUDA wheel index).
+# Install it manually with:
+#   pip install torch --index-url https://download.pytorch.org/whl/cpu

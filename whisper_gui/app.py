@@ -1,10 +1,10 @@
-import os
-import sys
 import datetime
+import os
 import platform
 import subprocess
+import sys
 
-from .bootstrap import ensure_gui_dependency, get_python_command
+from .bootstrap import ensure_gui_dependency, find_missing_modules, get_python_command
 
 ensure_gui_dependency()
 
@@ -13,16 +13,36 @@ from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QLineEdit, QPushButton, QProgressBar, QPlainTextEdit,
     QComboBox, QFileDialog, QSplitter, QStatusBar, QStyleFactory, QMessageBox,
-    QInputDialog
+    QInputDialog,
 )
-from .constants import DEVICE_CHOICES, MODEL_CACHE, MODEL_REFERENCE_SIZES_MB, SUPPORTED_LANGUAGES, WHISPER_MODELS
-from .download import get_whisper_cache_dir
+
+from .constants import DEVICE_CHOICES, MODEL_REFERENCE_SIZES_MB, SUPPORTED_LANGUAGES, WHISPER_MODELS
+from .download import (
+    clear_model_cache,
+    get_cached_model_size_mb,
+    get_whisper_cache_dir,
+    is_model_cached,
+)
 from .i18n import I18n
 from .threads import InstallThread, ModelDownloadThread, TranscriptionThread
 from .utils import (
-    DARKDETECT, DEFAULT_FONT, dark_palette, dark_stylesheet, darkdetect_is_dark, detect_gpu,
-    ensure_arrow_icons, get_system_language, is_admin, light_stylesheet, recommend_model, system_font
+    DARKDETECT,
+    DEFAULT_FONT,
+    dark_palette,
+    dark_stylesheet,
+    darkdetect_is_dark,
+    detect_gpu,
+    ensure_arrow_icons,
+    get_system_language,
+    has_ffmpeg,
+    is_admin,
+    light_stylesheet,
+    recommend_model,
+    system_font,
 )
+
+YES = QMessageBox.StandardButton.Yes
+NO = QMessageBox.StandardButton.No
 
 
 class MainWindow(QMainWindow):
@@ -30,6 +50,8 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.settings = QSettings("WhisperGUI", "UserPrefs")
         self.lang = self.settings.value("lang", get_system_language())
+        if self.lang not in I18n.translations:
+            self.lang = "en"
         dark_default = DARKDETECT and darkdetect_is_dark()
         self.theme_dark = self.settings.value("dark", dark_default, bool)
 
@@ -37,17 +59,22 @@ class MainWindow(QMainWindow):
         self.gpu_available = has_cuda
         self.gpu_name = gpu_name
         self.vram = vram
+        self.has_ffmpeg = has_ffmpeg()
+        self.is_macos = platform.system() == "Darwin"
 
         self.user_device_choice = self.settings.value("device", "auto")
         if self.user_device_choice not in DEVICE_CHOICES:
             self.user_device_choice = "auto"
 
         self.effective_device = self._resolve_effective_device()
-        self.recommended_model = recommend_model(self.effective_device, self.vram if self.gpu_available else 0)
+        self.recommended_model = recommend_model(self.effective_device, self._usable_vram())
         self.output_dir = self.settings.value("output_dir", os.path.expanduser("~"))
-        self.thread = None
+        self.transcription_thread = None
+        self.model_download_thread = None
+        self.install_thread = None
         self.file_paths = []
         self.last_error = None
+        self.last_failure_count = 0
         self.manual_stop = False
 
         self.init_ui()
@@ -55,22 +82,38 @@ class MainWindow(QMainWindow):
         self.update_texts()
         self.restore_state()
 
-        self._log_event(I18n.get("log_app_started", self.lang))
+        self._log_event(self._t("log_app_started"))
         if not is_admin():
-            self._append_log(f"[!] {I18n.get('admin_warning', self.lang)}")
+            self._append_log("[!] %s" % self._t("admin_warning"))
+        self._log_hardware()
+        self._log_event(self._t("ready"))
+        self.status_bar.showMessage(self._t("ready"))
+
+    def _t(self, key, **kwargs):
+        return I18n.get(key, self.lang, **kwargs)
+
+    def _entry(self, key, **kwargs):
+        return self._t(key).format(**kwargs) if kwargs else self._t(key)
+
+    def _log_hardware(self):
         if self.gpu_available:
-            self._log_event(I18n.get("gpu_detected", self.lang, name=self.gpu_name, mem=self.vram))
+            self._log_event(self._entry("gpu_detected", name=self.gpu_name, mem=self.vram))
         else:
-            self._log_event(I18n.get("no_gpu", self.lang))
-        self._log_event(I18n.get("ready", self.lang))
-        self.status_bar.showMessage(I18n.get("ready", self.lang))
+            self._log_event(self._t("no_gpu"))
+        if not self.has_ffmpeg:
+            self._append_log("[!] %s" % self._t("ffmpeg_missing"))
+
+    def _usable_vram(self):
+        return self.vram if self.gpu_available else 0
 
     def _append_log(self, msg):
         self.log_view.appendPlainText(msg)
-        self.log_view.verticalScrollBar().setValue(self.log_view.verticalScrollBar().maximum())
+        scrollbar = self.log_view.verticalScrollBar()
+        scrollbar.setValue(scrollbar.maximum())
 
     def _log_event(self, msg):
-        self._append_log(f"[{datetime.datetime.now().strftime('%H:%M:%S')}] {msg}")
+        stamp = datetime.datetime.now().strftime("%H:%M:%S")
+        self._append_log("[%s] %s" % (stamp, msg))
 
     def _resolve_effective_device(self):
         if self.user_device_choice == "cpu" or not self.gpu_available:
@@ -90,18 +133,21 @@ class MainWindow(QMainWindow):
 
     def _device_display_name(self, device):
         if device == "cuda":
-            return I18n.get("device_gpu", self.lang)
+            return self._t("device_gpu")
         if device == "mps":
-            return "MPS"
-        return I18n.get("device_cpu", self.lang)
+            return self._t("device_mps")
+        return self._t("device_cpu")
+
+    def _model_display_name(self, model):
+        return self._t("model_%s" % model)
 
     def init_ui(self):
         self.setWindowTitle("Whisper Speech Recognition")
         self.setMinimumSize(860, 640)
         self.resize(960, 720)
-        cw = QWidget()
-        self.setCentralWidget(cw)
-        layout = QVBoxLayout(cw)
+        central = QWidget()
+        self.setCentralWidget(central)
+        layout = QVBoxLayout(central)
         layout.setContentsMargins(20, 16, 20, 16)
         layout.setSpacing(10)
 
@@ -141,9 +187,11 @@ class MainWindow(QMainWindow):
 
         self.cache_label = QLabel()
         self.cache_label.setStyleSheet("color: gray;")
-        self.cache_label.setText(I18n.get("cache_dir_label", self.lang,
-                                          path=get_whisper_cache_dir()))
         layout.addWidget(self.cache_label)
+
+        self.ffmpeg_label = QLabel()
+        self.ffmpeg_label.setStyleSheet("color: #b36b00;")
+        layout.addWidget(self.ffmpeg_label)
 
         language_row = QHBoxLayout()
         self.language_label = QLabel()
@@ -179,14 +227,10 @@ class MainWindow(QMainWindow):
         self.model_label = QLabel()
         model_row.addWidget(self.model_label)
         self.model_combo = QComboBox()
-        for m in WHISPER_MODELS:
-            self.model_combo.addItem(I18n.get("model_" + m, self.lang), m)
-        idx_m = self.model_combo.findData(self.recommended_model)
-        if idx_m >= 0:
-            self.model_combo.setCurrentIndex(idx_m)
+        self._refresh_model_list()
         model_row.addWidget(self.model_combo, 1)
         self.rec_btn = QPushButton()
-        self.rec_btn.clicked.connect(self.apply_recommendation)
+        self.rec_btn.clicked.connect(lambda: self.apply_recommendation())
         model_row.addWidget(self.rec_btn)
         layout.addLayout(model_row)
 
@@ -198,7 +242,6 @@ class MainWindow(QMainWindow):
         self.result_view = QPlainTextEdit()
         self.result_view.setReadOnly(True)
         self.splitter.addWidget(self.result_view)
-
         self.log_view = QPlainTextEdit()
         self.log_view.setReadOnly(True)
         self.log_view.setMaximumBlockCount(2000)
@@ -216,42 +259,57 @@ class MainWindow(QMainWindow):
         self.install_cpu_btn = QPushButton()
         self.install_cpu_btn.clicked.connect(lambda: self._perform_install("cpu"))
         btn_row.addWidget(self.install_cpu_btn)
-
         self.install_gpu_btn = QPushButton()
         self.install_gpu_btn.clicked.connect(lambda: self._perform_install("gpu"))
         btn_row.addWidget(self.install_gpu_btn)
-
         self.install_model_btn = QPushButton()
         self.install_model_btn.clicked.connect(self._perform_model_install)
         btn_row.addWidget(self.install_model_btn)
         btn_row.addStretch()
 
-        btn_font = DEFAULT_FONT
-        self.install_cpu_btn.setFont(btn_font)
-        self.install_gpu_btn.setFont(btn_font)
-        self.install_model_btn.setFont(btn_font)
+        install_buttons = (self.install_cpu_btn, self.install_gpu_btn, self.install_model_btn)
+        for button in install_buttons:
+            button.setFont(DEFAULT_FONT)
 
         self.start_btn = QPushButton()
         self.start_btn.setObjectName("primaryBtn")
-        self.start_btn.setFont(btn_font)
+        self.start_btn.setFont(DEFAULT_FONT)
         self.start_btn.clicked.connect(self.start_transcription)
         btn_row.addWidget(self.start_btn)
         self.stop_btn = QPushButton()
-        self.stop_btn.setFont(btn_font)
+        self.stop_btn.setFont(DEFAULT_FONT)
         self.stop_btn.clicked.connect(self.stop_transcription)
         self.stop_btn.setEnabled(False)
         btn_row.addWidget(self.stop_btn)
         layout.addLayout(btn_row)
 
-        self.install_cpu_btn.setText(I18n.get("install_btn_cpu", self.lang))
-        self.install_gpu_btn.setText(I18n.get("install_btn_gpu", self.lang))
-        self.install_model_btn.setText(I18n.get("install_btn_model", self.lang))
-
         self.status_bar = QStatusBar()
         self.setStatusBar(self.status_bar)
+        self._update_buttons()
 
-    def refresh_device_list(self):
-        self._populate_device_combo()
+    def _active_threads(self):
+        candidates = (self.transcription_thread, self.model_download_thread, self.install_thread)
+        return [t for t in candidates if t is not None and t.isRunning()]
+
+    def _update_buttons(self):
+        transcribing = self.transcription_thread is not None and self.transcription_thread.isRunning()
+        background = self._background_task_running()
+        locked = transcribing or background
+        self.install_cpu_btn.setEnabled(not locked)
+        self.install_gpu_btn.setEnabled(not locked and not self.is_macos)
+        self.install_model_btn.setEnabled(not locked)
+        self.start_btn.setEnabled(not locked)
+        self.stop_btn.setEnabled(transcribing)
+        if self.is_macos:
+            self.install_gpu_btn.setText(self._t("install_btn_unavailable"))
+            self.install_gpu_btn.setToolTip(self._t("gpu_not_supported_macos"))
+        else:
+            self.install_gpu_btn.setText(self._t("install_btn_gpu"))
+            self.install_gpu_btn.setToolTip("")
+
+    def _background_task_running(self):
+        running = (self.install_thread, self.model_download_thread)
+        return any(t is not None and t.isRunning() for t in running)
 
     def _populate_device_combo(self):
         self.device_combo.blockSignals(True)
@@ -259,11 +317,13 @@ class MainWindow(QMainWindow):
         for value in DEVICE_CHOICES:
             if value == "gpu" and not self.gpu_available:
                 continue
-            label_key = "auto" if value == "auto" else f"device_{value}"
-            self.device_combo.addItem(I18n.get(label_key, self.lang), value)
-        idx = self.device_combo.findData(self.user_device_choice)
-        if idx >= 0:
-            self.device_combo.setCurrentIndex(idx)
+            label_key = "auto" if value == "auto" else "device_%s" % value
+            self.device_combo.addItem(self._t(label_key), value)
+        index = self.device_combo.findData(self.user_device_choice)
+        if index < 0:
+            index = self.device_combo.findData("auto")
+        self.device_combo.setCurrentIndex(max(0, index))
+        self.user_device_choice = self.device_combo.currentData()
         self.device_combo.blockSignals(False)
 
     def _populate_language_combo(self):
@@ -271,122 +331,121 @@ class MainWindow(QMainWindow):
         self.language_combo.blockSignals(True)
         self.language_combo.clear()
         for code in SUPPORTED_LANGUAGES:
-            self.language_combo.addItem(I18n.get("language_" + code, self.lang), code)
-        idx = self.language_combo.findData(current)
-        if idx >= 0:
-            self.language_combo.setCurrentIndex(idx)
+            self.language_combo.addItem(self._t("language_%s" % code), code)
+        index = self.language_combo.findData(current)
+        self.language_combo.setCurrentIndex(index if index >= 0 else 0)
         self.language_combo.blockSignals(False)
 
-    def _update_file_summary(self):
-        if self.file_paths:
-            self.file_edit.setText(I18n.get("file_summary", self.lang,
-                                            count=len(self.file_paths),
-                                            first=self.file_paths[0]))
-        else:
-            self.file_edit.clear()
-
-    def change_device(self, idx):
-        self.user_device_choice = self.device_combo.currentData()
-        self.effective_device = self._resolve_effective_device()
-        self.recommended_model = recommend_model(self.effective_device,
-                                                 self.vram if self.gpu_available else 0)
-        self.rec_label.setText(I18n.get("model_recommendation", self.lang,
-                                         model=I18n.get("model_" + self.recommended_model, self.lang)))
-        self._log_event(I18n.get("log_device_change", self.lang, device=self.user_device_choice.upper()))
-        self.update_texts()
-
-    def update_texts(self):
-        t = lambda key, **kw: I18n.get(key, self.lang, **kw)
-        self.title_label.setText(t("title"))
-        gpu_info = t("gpu", name=self.gpu_name) if self.gpu_available else t("cpu")
-        self.gpu_label.setText(gpu_info)
-        self.device_label.setText(t("device_label"))
-        self.language_label.setText(t("language_label"))
-        self.file_label.setText(t("file_label"))
-        self.file_btn.setText(t("browse"))
-        self.out_label.setText(t("output_label"))
-        self.out_btn.setText(t("output_browse"))
-        self.model_label.setText(t("model_label"))
-        self.rec_btn.setText(t("recommend"))
-        self.rec_label.setText(t("model_recommendation", model=t("model_" + self.recommended_model)))
-        self.start_btn.setText(t("start"))
-        self.stop_btn.setText(t("stop"))
-        self.install_cpu_btn.setText(t("install_btn_cpu"))
-        self.install_gpu_btn.setText(t("install_btn_gpu"))
-        self.install_model_btn.setText(t("install_btn_model"))
-        self.cache_label.setText(t("cache_dir_label",
-                                  path=get_whisper_cache_dir()))
-        self.theme_btn.setText(t("dark" if self.theme_dark else "light"))
-        self._refresh_model_list()
-        self.refresh_device_list()
-        self._populate_language_combo()
-        self._update_file_summary()
-
     def _refresh_model_list(self):
-        t = lambda key, **kw: I18n.get(key, self.lang, **kw)
         current = self.model_combo.currentData()
-        cache_dir = get_whisper_cache_dir()
         self.model_combo.blockSignals(True)
         self.model_combo.clear()
-        for m in WHISPER_MODELS:
-            cache_file = os.path.join(cache_dir, f"{m}.pt")
-            if os.path.isfile(cache_file):
-                size_text = f"{os.path.getsize(cache_file) / (1024 * 1024):.0f}MB"
-            else:
-                size_text = f"{MODEL_REFERENCE_SIZES_MB[m]}MB"
-            self.model_combo.addItem(f"{t('model_' + m)} ({size_text})", m)
-        idx = self.model_combo.findData(current)
-        if idx >= 0:
-            self.model_combo.setCurrentIndex(idx)
+        for model in WHISPER_MODELS:
+            size_mb = get_cached_model_size_mb(model) or MODEL_REFERENCE_SIZES_MB[model]
+            label = "%s (%dMB)" % (self._model_display_name(model), round(size_mb))
+            self.model_combo.addItem(label, model)
+        index = self.model_combo.findData(current)
+        if index < 0:
+            index = self.model_combo.findData(self.recommended_model)
+        self.model_combo.setCurrentIndex(index if index >= 0 else 0)
         self.model_combo.blockSignals(False)
 
+    def _update_file_summary(self):
+        if not self.file_paths:
+            self.file_edit.clear()
+            return
+        entry = self._t("file_summary")
+        self.file_edit.setText(entry.format(count=len(self.file_paths), first=self.file_paths[0]))
+
+    def change_device(self, _index):
+        self.user_device_choice = self.device_combo.currentData()
+        self.effective_device = self._resolve_effective_device()
+        self.recommended_model = recommend_model(self.effective_device, self._usable_vram())
+        self.apply_recommendation(log_event=False)
+        label = self.user_device_choice.upper()
+        self._log_event(self._entry("log_device_change", device=label))
+        self.update_texts()
+
+    def change_language(self, _index):
+        self.lang = self.lang_combo.currentData()
+        name = self.lang_combo.currentText()
+        self._log_event(self._entry("log_language_changed", name=name))
+        self.update_texts()
+
     def toggle_theme(self):
-        t = lambda key, **kw: I18n.get(key, self.lang, **kw)
         self.theme_dark = not self.theme_dark
         self.apply_theme(self.theme_dark)
-        self._log_event(t("log_theme_change", theme=t("dark" if self.theme_dark else "light")))
+        label = self._t("dark") if self.theme_dark else self._t("light")
+        self._log_event(self._entry("log_theme_change", theme=label))
 
     def apply_theme(self, dark):
         icon_dir = ensure_arrow_icons().replace("\\", "/")
         arrow_name = "arrow_dark.svg" if dark else "arrow_light.svg"
-        arrow_url = os.path.join(icon_dir, arrow_name).replace("\\", "/")
-        palette = dark_palette() if dark else QApplication.style().standardPalette()
-        QApplication.instance().setPalette(palette)
-        stylesheet = dark_stylesheet(arrow_url) if dark else light_stylesheet(arrow_url)
-        self.setStyleSheet(stylesheet)
+        arrow_url = "%s/%s" % (icon_dir, arrow_name)
+        application = QApplication.instance()
+        application.setPalette(dark_palette() if dark else QApplication.style().standardPalette())
+        self.setStyleSheet(dark_stylesheet(arrow_url) if dark else light_stylesheet(arrow_url))
         self.update_texts()
 
-    def change_language(self, idx):
-        self.lang = self.lang_combo.currentData()
-        lang_name = "中文" if self.lang == "zh" else "English"
-        self._log_event(I18n.get("log_language_changed", self.lang, name=lang_name))
-        self.update_texts()
+    def update_texts(self):
+        self.title_label.setText(self._t("title"))
+        if self.gpu_available:
+            self.gpu_label.setText(self._entry("gpu", name=self.gpu_name))
+        else:
+            self.gpu_label.setText(self._t("cpu"))
+        self.device_label.setText(self._t("device_label"))
+        self.language_label.setText(self._t("language_label"))
+        self.file_label.setText(self._t("file_label"))
+        self.file_btn.setText(self._t("browse"))
+        self.out_label.setText(self._t("output_label"))
+        self.out_btn.setText(self._t("output_browse"))
+        self.model_label.setText(self._t("model_label"))
+        self.rec_btn.setText(self._t("recommend"))
+        recommended = self._model_display_name(self.recommended_model)
+        self.rec_label.setText(self._entry("model_recommendation", model=recommended))
+        self.start_btn.setText(self._t("start"))
+        self.stop_btn.setText(self._t("stop"))
+        self.install_cpu_btn.setText(self._t("install_btn_cpu"))
+        self.install_model_btn.setText(self._t("install_btn_model"))
+        cache_path = get_whisper_cache_dir()
+        self.cache_label.setText(self._entry("cache_dir_label", path=cache_path))
+        self.ffmpeg_label.setText("" if self.has_ffmpeg else self._t("ffmpeg_missing_label"))
+        self.ffmpeg_label.setVisible(not self.has_ffmpeg)
+        theme_label = self._t("dark") if self.theme_dark else self._t("light")
+        self.theme_btn.setText(theme_label)
+        self._refresh_model_list()
+        self._populate_device_combo()
+        self._populate_language_combo()
+        self._update_file_summary()
+        self._update_buttons()
 
     def select_file(self):
-        t = lambda key: I18n.get(key, self.lang)
-        paths, _ = QFileDialog.getOpenFileNames(self, t("browse_file"), "", t("audio_filter"))
-        if paths:
-            self.file_paths = paths
-            self._update_file_summary()
-            auto_out = os.path.dirname(paths[0])
-            self.out_edit.setText(auto_out)
-            self.output_dir = auto_out
-            self._log_event(I18n.get("log_files_selected", self.lang, count=len(paths)))
+        paths, _ = QFileDialog.getOpenFileNames(
+            self, self._t("browse_file"), "", self._t("audio_filter"),
+        )
+        if not paths:
+            return
+        self.file_paths = paths
+        self._update_file_summary()
+        self._log_event(self._entry("log_files_selected", count=len(paths)))
 
     def select_output_dir(self):
-        t = lambda key: I18n.get(key, self.lang)
-        path = QFileDialog.getExistingDirectory(self, t("output_label"), self.out_edit.text())
-        if path:
-            self.out_edit.setText(path)
-            self.output_dir = path
-            self._log_event(I18n.get("log_output_dir_changed", self.lang, dir=path))
+        current = self.out_edit.text()
+        path = QFileDialog.getExistingDirectory(self, self._t("output_label"), current)
+        if not path:
+            return
+        self.out_edit.setText(path)
+        self.output_dir = path
+        self._log_event(self._entry("log_output_dir_changed", dir=path))
 
-    def apply_recommendation(self):
-        idx = self.model_combo.findData(self.recommended_model)
-        if idx >= 0:
-            self.model_combo.setCurrentIndex(idx)
-            self._log_event(I18n.get("log_model_recommended", self.lang,
-                                     model=I18n.get("model_" + self.recommended_model, self.lang)))
+    def apply_recommendation(self, log_event=True):
+        index = self.model_combo.findData(self.recommended_model)
+        if index < 0:
+            return
+        self.model_combo.setCurrentIndex(index)
+        if log_event:
+            name = self._model_display_name(self.recommended_model)
+            self._log_event(self._entry("log_model_recommended", model=name))
 
     def _current_torch_matches(self, target_device):
         try:
@@ -394,40 +453,40 @@ class MainWindow(QMainWindow):
             has_cuda = torch.cuda.is_available()
         except ImportError:
             return False
-        if target_device == "gpu":
-            return has_cuda
-        return not has_cuda
+        return has_cuda if target_device == "gpu" else not has_cuda
 
     def _describe_current_torch(self):
         try:
             import torch
             if torch.cuda.is_available():
-                return I18n.get("current_torch_gpu", self.lang)
-            return I18n.get("current_torch_cpu", self.lang)
+                return self._t("current_torch_gpu")
+            return self._t("current_torch_cpu")
         except ImportError:
-            return I18n.get("current_torch_none", self.lang)
+            return self._t("current_torch_none")
+
+    def _model_label_with_size(self, model):
+        size_mb = get_cached_model_size_mb(model) or MODEL_REFERENCE_SIZES_MB[model]
+        return "%s (%dMB)" % (self._model_display_name(model), round(size_mb))
 
     def _perform_model_install(self):
-        t = lambda key, **kw: I18n.get(key, self.lang, **kw)
-        model_names = WHISPER_MODELS
-        display_names = [f"{t('model_' + m)} ({MODEL_REFERENCE_SIZES_MB[m]}MB)" for m in model_names]
-        display, ok = QInputDialog.getItem(
-            self, t("model_install_title"), t("model_install_prompt"),
-            display_names, 0, False
+        names = list(WHISPER_MODELS)
+        labels = [self._model_label_with_size(model) for model in names]
+        choice, accepted = QInputDialog.getItem(
+            self, self._t("model_install_title"), self._t("model_install_prompt"),
+            labels, 0, False,
         )
-        if not ok or not display:
+        if not accepted or choice not in labels:
             return
-        model = model_names[display_names.index(display)]
-
-        model_file = os.path.join(get_whisper_cache_dir(), f"{model}.pt")
-        if os.path.isfile(model_file):
-            size_mb = os.path.getsize(model_file) / (1024 * 1024)
-            QMessageBox.information(self, t("model_install_title"),
-                                    t("model_already_installed", model=model))
-            self._append_log(t("model_already_installed", model=model) + f" ({size_mb:.1f} MB)")
+        model = names[labels.index(choice)]
+        if is_model_cached(model):
+            size_mb = get_cached_model_size_mb(model)
+            message = self._entry("model_already_installed", model=model)
+            QMessageBox.information(self, self._t("model_install_title"), message)
+            self._append_log("%s (%.1f MB)" % (message, size_mb))
             return
+        self._download_model(model)
 
-        self.install_model_btn.setEnabled(False)
+    def _download_model(self, model):
         self.progress.setRange(0, 100)
         self.progress.setValue(0)
         self.progress.setVisible(True)
@@ -435,145 +494,184 @@ class MainWindow(QMainWindow):
         self.model_download_thread.log.connect(self._append_log)
         self.model_download_thread.progress.connect(self._on_model_download_progress)
         self.model_download_thread.done.connect(self._on_model_download_done)
+        self._update_buttons()
         self.model_download_thread.start()
 
-    def _on_model_download_progress(self, percent, total):
+    def _on_model_download_progress(self, percent, _total):
         self.progress.setValue(percent)
 
     def _on_model_download_done(self, success, message):
-        t = lambda key, **kw: I18n.get(key, self.lang, **kw)
         self._append_log(message)
         self.progress.setVisible(False)
+        self.progress.setRange(0, 0)
         if success:
             self.status_bar.showMessage(message)
-            QMessageBox.information(self, t("model_install_title"), message)
+            QMessageBox.information(self, self._t("model_install_title"), message)
         else:
-            QMessageBox.critical(self, t("error_title"), message)
-        self.install_model_btn.setEnabled(True)
-        self.status_bar.showMessage(I18n.get("ready", self.lang))
+            QMessageBox.critical(self, self._t("error_title"), message)
+        self._refresh_model_list()
+        self._update_buttons()
+        self.status_bar.showMessage(self._t("ready"))
 
     def _perform_install(self, target_device):
-        t = lambda key, **kw: I18n.get(key, self.lang, **kw)
-
-        if target_device == "gpu" and platform.system() == "Darwin":
-            QMessageBox.warning(self, t("error_title"), t("gpu_not_supported_macos"))
+        if self._active_threads():
             return
-
+        if target_device == "gpu" and self.is_macos:
+            QMessageBox.warning(self, self._t("error_title"), self._t("gpu_not_supported_macos"))
+            return
         if self._current_torch_matches(target_device):
             key = "already_installed_gpu" if target_device == "gpu" else "already_installed_cpu"
-            QMessageBox.information(self, t("install_confirm_title"), t(key))
+            QMessageBox.information(self, self._t("install_confirm_title"), self._t(key))
             return
         if getattr(sys, "frozen", False) and not get_python_command():
-            QMessageBox.warning(self, t("error_title"), t("packaged_install_requires_python"))
+            message = self._t("packaged_install_requires_python")
+            QMessageBox.warning(self, self._t("error_title"), message)
             return
-
-        current_desc = self._describe_current_torch()
         confirm_key = "install_confirm_gpu" if target_device == "gpu" else "install_confirm_cpu"
-        msg = current_desc + "\n\n" + t(confirm_key)
+        body = "%s\n\n%s" % (self._describe_current_torch(), self._t(confirm_key))
         reply = QMessageBox.question(
-            self, t("install_confirm_title"),
-            msg,
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+            self, self._t("install_confirm_title"), body, YES | NO, NO,
         )
-        if reply != QMessageBox.StandardButton.Yes:
+        if reply != YES:
             return
-
-        self.install_cpu_btn.setEnabled(False)
-        self.install_gpu_btn.setEnabled(False)
-        self.status_bar.showMessage(t("installing"))
-        self._append_log(t("checking_deps"))
-
+        self.status_bar.showMessage(self._t("installing"))
+        self._append_log(self._t("checking_deps"))
         self.install_thread = InstallThread(target_device, self.lang)
         self.install_thread.log.connect(self._append_log)
         self.install_thread.install_done.connect(self._on_install_done)
+        self._update_buttons()
         self.install_thread.start()
 
     def _restart_app(self):
         try:
-            entry = os.path.abspath(sys.argv[0]) if os.path.isfile(sys.argv[0]) else os.path.abspath(__file__)
-            subprocess.Popen([sys.executable, entry])
-        except Exception:
+            if getattr(sys, "frozen", False):
+                subprocess.Popen([sys.executable])
+            else:
+                root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+                entry = os.path.join(root, "WhisperGUI.py")
+                subprocess.Popen([sys.executable, entry], cwd=root)
+        except OSError:
             pass
         QApplication.instance().quit()
 
     def _on_install_done(self, success, changed, message):
-        t = lambda key, **kw: I18n.get(key, self.lang, **kw)
-        if success:
-            MODEL_CACHE.clear()
-            try:
-                has_cuda, self.gpu_name, self.vram = detect_gpu()
-                self.gpu_available = has_cuda
-                self.effective_device = self._resolve_effective_device()
-                self.recommended_model = recommend_model(self.effective_device,
-                                                         self.vram if self.gpu_available else 0)
-                self.apply_recommendation()
-                self.update_texts()
-            except Exception as e:
-                self._append_log(t("log_import_error", e=e))
+        if not success:
             self._append_log(message)
-            self.status_bar.showMessage(message)
-            if changed:
-                reply = QMessageBox.question(
-                    self, t("restart_confirm_title"),
-                    t("restart_confirm_msg"),
-                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
-                )
-                if reply == QMessageBox.StandardButton.Yes:
-                    self._restart_app()
-            else:
-                QMessageBox.information(self, t("install_confirm_title"), t("install_already_done"))
+            QMessageBox.critical(self, self._t("error_title"), message)
+            self._update_buttons()
+            self.status_bar.showMessage(self._t("ready"))
+            return
+        clear_model_cache()
+        self._refresh_hardware_state()
+        self._append_log(message)
+        self.status_bar.showMessage(message)
+        if changed:
+            reply = QMessageBox.question(
+                self, self._t("restart_confirm_title"),
+                self._t("restart_confirm_msg"), YES | NO, NO,
+            )
+            if reply == YES:
+                self._restart_app()
+                return
         else:
-            self._append_log(message)
-            QMessageBox.critical(self, t("error_title"), message)
+            QMessageBox.information(self, self._t("install_confirm_title"),
+                                    self._t("install_already_done"))
+        self._update_buttons()
+        self.status_bar.showMessage(self._t("ready"))
 
-        self.install_cpu_btn.setEnabled(True)
-        self.install_gpu_btn.setEnabled(True)
-        self.status_bar.showMessage(I18n.get("ready", self.lang))
+    def _refresh_hardware_state(self):
+        try:
+            has_cuda, gpu_name, vram = detect_gpu()
+        except (AssertionError, RuntimeError):
+            return
+        self.gpu_available = has_cuda
+        self.gpu_name = gpu_name
+        self.vram = vram
+        self.effective_device = self._resolve_effective_device()
+        self.recommended_model = recommend_model(self.effective_device, self._usable_vram())
+        self.apply_recommendation(log_event=False)
+        self.update_texts()
+
+    def _all_files_are_wav(self):
+        return all(path.lower().endswith(".wav") for path in self.file_paths)
+
+    def _preflight(self):
+        missing = find_missing_modules()
+        if missing:
+            names = ", ".join(missing)
+            QMessageBox.warning(self, self._t("error_title"),
+                                self._entry("deps_missing", list=names))
+            return False
+        model = self.model_combo.currentData()
+        if not is_model_cached(model):
+            body = "%s\n\n%s" % (self._entry("model_not_downloaded", model=model),
+                                 self._t("download_first"))
+            reply = QMessageBox.question(
+                self, self._t("warning_title"), body, YES | NO, YES,
+            )
+            if reply != YES:
+                return False
+            self._download_model(model)
+            return False
+        if not self.has_ffmpeg and not self._all_files_are_wav():
+            QMessageBox.warning(self, self._t("error_title"), self._t("ffmpeg_missing"))
+            return False
+        return True
 
     def start_transcription(self):
-        t = lambda key, **kw: I18n.get(key, self.lang, **kw)
+        if not self.file_paths:
+            QMessageBox.warning(self, self._t("error_title"), self._t("select_file"))
+            return
         missing = [path for path in self.file_paths if not os.path.isfile(path)]
-        if not self.file_paths or missing:
-            QMessageBox.warning(self, t("error_title"), t("select_file"))
+        if missing:
+            joined = "\n".join(missing)
+            QMessageBox.warning(self, self._t("error_title"),
+                                self._entry("missing_files", paths=joined))
             return
-        out_dir = self.out_edit.text()
+        out_dir = self.out_edit.text().strip()
         if not out_dir or not os.path.isdir(out_dir):
-            QMessageBox.warning(self, t("error_title"), t("invalid_dir"))
+            QMessageBox.warning(self, self._t("error_title"), self._t("invalid_dir"))
             return
-        self.output_dir = out_dir
+        if not self._preflight():
+            return
+        self._begin_transcription(out_dir)
 
+    def _begin_transcription(self, out_dir):
+        self.output_dir = out_dir
         device = self.get_effective_device()
         model_name = self.model_combo.currentData()
-        transcribe_language = self.language_combo.currentData()
         self.last_error = None
+        self.last_failure_count = 0
         self.manual_stop = False
-        self._log_event(I18n.get("log_start_transcription", self.lang, model=model_name, device=device))
-
+        entry = self._entry("log_start_transcription", model=model_name, device=device)
+        self._log_event(entry)
         self.start_btn.setEnabled(False)
         self.stop_btn.setEnabled(True)
         self.progress.setRange(0, len(self.file_paths))
         self.progress.setValue(0)
         self.progress.setFormat("%v / %m")
         self.progress.setVisible(True)
-        self.status_bar.showMessage(f"{I18n.get('transcribing', self.lang)} ({self._device_display_name(device)})")
+        label = self._device_display_name(device)
+        self.status_bar.showMessage("%s (%s)" % (self._t("transcribing"), label))
         self.log_view.clear()
         self.result_view.clear()
-
-        self.thread = TranscriptionThread(
+        self.transcription_thread = TranscriptionThread(
             self.file_paths,
             model_name,
             device,
             self.output_dir,
             ui_lang=self.lang,
-            transcribe_language=transcribe_language,
+            transcribe_language=self.language_combo.currentData(),
         )
-        self.thread.status.connect(self.status_bar.showMessage)
-        self.thread.log.connect(self._append_log)
-        self.thread.progress.connect(self._on_transcription_progress)
-        self.thread.result.connect(self._on_transcription_result)
-        self.thread.error.connect(self._on_transcription_error)
-        self.thread.finished.connect(self.on_finished)
-        self.thread.start()
+        thread = self.transcription_thread
+        thread.status.connect(self.status_bar.showMessage)
+        thread.log.connect(self._append_log)
+        thread.progress.connect(self._on_transcription_progress)
+        thread.result.connect(self._on_transcription_result)
+        thread.file_failed.connect(self._on_file_failed)
+        thread.error.connect(self._on_transcription_error)
+        thread.finished.connect(self.on_finished)
+        thread.start()
 
     def _on_transcription_progress(self, current, total):
         self.progress.setRange(0, total)
@@ -585,80 +683,96 @@ class MainWindow(QMainWindow):
 
     def _on_transcription_error(self, message):
         self.last_error = message
-        self._append_log(I18n.get("log_error_prefix", self.lang, e=message))
+        self._append_log(self._entry("log_error_prefix", e=message))
+
+    def _on_file_failed(self, message):
+        self._append_log(self._entry("log_error_prefix", e=message))
 
     def stop_transcription(self):
-        t = lambda key, **kw: I18n.get(key, self.lang, **kw)
-        if self.thread and self.thread.isRunning():
-            reply = QMessageBox.question(
-                self, t("force_stop_title"),
-                t("force_stop_confirm"),
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
-            )
-            if reply == QMessageBox.StandardButton.Yes:
-                self.manual_stop = True
-                try:
-                    self.thread.finished.disconnect(self.on_finished)
-                except TypeError:
-                    pass
-                self.thread.terminate()
-                self.thread.wait(2000)
-                self._log_event(I18n.get("force_stop_executed", self.lang))
-                self.status_bar.showMessage(I18n.get("force_stop_executed", self.lang))
-                self.on_finished()
-        else:
-            self.status_bar.showMessage(I18n.get("stop_note", self.lang))
+        thread = self.transcription_thread
+        if thread is None or not thread.isRunning():
+            self.status_bar.showMessage(self._t("stop_note"))
+            return
+        reply = QMessageBox.question(
+            self, self._t("force_stop_title"), self._t("force_stop_confirm"), YES | NO, NO,
+        )
+        if reply != YES:
+            return
+        self.manual_stop = True
+        thread.request_cancel()
+        try:
+            thread.finished.disconnect(self.on_finished)
+        except TypeError:
+            pass
+        if not thread.wait(3000):
+            thread.terminate()
+            thread.wait(2000)
+        thread.restore_streams()
+        self._log_event(self._t("force_stop_executed"))
+        self.status_bar.showMessage(self._t("force_stop_executed"))
+        self.on_finished()
 
     def on_finished(self):
-        self.start_btn.setEnabled(True)
-        self.stop_btn.setEnabled(False)
         self.progress.setVisible(False)
+        self.progress.setFormat("")
+        self.progress.setRange(0, 0)
+        self._update_buttons()
+        if self.manual_stop:
+            self.status_bar.showMessage(self._t("force_stop_executed"))
+            return
         if self.last_error:
-            self.status_bar.showMessage(I18n.get("error", self.lang, msg=self.last_error))
-        elif self.manual_stop:
-            self.status_bar.showMessage(I18n.get("force_stop_executed", self.lang))
-        else:
-            saved_count = len(self.thread.output_paths) if self.thread else 0
-            self.status_bar.showMessage(I18n.get("batch_done", self.lang, count=saved_count))
-            self._append_log(I18n.get("log_transcription_finished", self.lang))
+            self.status_bar.showMessage(self._entry("error", msg=self.last_error))
+            return
+        thread = self.transcription_thread
+        saved = len(thread.output_paths) if thread else 0
+        failed = len(thread.failed_files) if thread else 0
+        if failed:
+            entry = self._t("batch_partial")
+            self.status_bar.showMessage(entry.format(count=saved, failed=failed))
+            return
+        self.status_bar.showMessage(self._entry("batch_done", count=saved))
+        self._append_log(self._t("log_transcription_finished"))
 
-    def closeEvent(self, event):
-        t = lambda key, **kw: I18n.get(key, self.lang, **kw)
-        active_threads = [
-            thread for thread in (
-                self.thread,
-                getattr(self, "model_download_thread", None),
-                getattr(self, "install_thread", None),
-            )
-            if thread is not None and thread.isRunning()
-        ]
-        if active_threads:
-            reply = QMessageBox.question(
-                self, t("close_task_title"), t("close_task_msg"),
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
-            )
-            if reply != QMessageBox.StandardButton.Yes:
-                event.ignore()
-                return
-            for thread in active_threads:
-                thread.terminate()
-                thread.wait(2000)
-        self._log_event(I18n.get("log_app_closing", self.lang))
+    def _save_settings(self):
         self.settings.setValue("lang", self.lang)
         self.settings.setValue("dark", self.theme_dark)
         self.settings.setValue("device", self.user_device_choice)
         self.settings.setValue("geometry", self.saveGeometry())
         self.settings.setValue("splitter", self.splitter.saveState())
-        self.settings.setValue("output_dir", self.output_dir)
+        self.settings.setValue("output_dir", self.out_edit.text().strip())
+        self.settings.sync()
+
+    def closeEvent(self, event):
+        active = self._active_threads()
+        if active:
+            reply = QMessageBox.question(
+                self, self._t("close_task_title"), self._t("close_task_msg"), YES | NO, NO,
+            )
+            if reply != YES:
+                event.ignore()
+                return
+            self._shutdown_threads(active)
+        self._log_event(self._t("log_app_closing"))
+        self._save_settings()
         super().closeEvent(event)
 
+    def _shutdown_threads(self, active):
+        for thread in active:
+            if hasattr(thread, "request_cancel"):
+                thread.request_cancel()
+            if not thread.wait(2000):
+                thread.terminate()
+                thread.wait(2000)
+        if self.transcription_thread is not None:
+            self.transcription_thread.restore_streams()
+
     def restore_state(self):
-        geom = self.settings.value("geometry")
-        if geom:
-            self.restoreGeometry(geom)
-        split = self.settings.value("splitter")
-        if split:
-            self.splitter.restoreState(split)
+        geometry = self.settings.value("geometry")
+        if geometry:
+            self.restoreGeometry(geometry)
+        splitter = self.settings.value("splitter")
+        if splitter:
+            self.splitter.restoreState(splitter)
         saved_out = self.settings.value("output_dir")
         if saved_out and os.path.isdir(saved_out):
             self.output_dir = saved_out
@@ -666,11 +780,11 @@ class MainWindow(QMainWindow):
 
 
 def main():
-    app = QApplication(sys.argv)
-    app.setStyle(QStyleFactory.create("Fusion"))
+    application = QApplication(sys.argv)
+    application.setStyle(QStyleFactory.create("Fusion"))
     window = MainWindow()
     window.show()
-    sys.exit(app.exec())
+    sys.exit(application.exec())
 
 
 if __name__ == "__main__":

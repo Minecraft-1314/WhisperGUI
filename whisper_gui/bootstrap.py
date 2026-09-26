@@ -1,8 +1,24 @@
+import importlib
+import importlib.util
 import os
 import shutil
-import sys
 import subprocess
-import importlib
+import sys
+
+from .constants import (
+    IMPORT_PROBE_TIMEOUT,
+    PACKAGE_INSTALL_TIMEOUT,
+    PYTHON_PROBE_TIMEOUT,
+)
+
+TRANSCRIPTION_MODULES = ("whisper", "torch")
+
+MODULE_DISTRIBUTIONS = {
+    "whisper": "openai-whisper",
+    "torch": "torch",
+}
+
+TORCH_DISTRIBUTION = "torch"
 
 
 def _no_window_flags():
@@ -14,11 +30,11 @@ def _is_valid_python(command):
         result = subprocess.run(
             command + ["-c", "import sys"],
             capture_output=True,
-            timeout=15,
+            timeout=PYTHON_PROBE_TIMEOUT,
             creationflags=_no_window_flags(),
         )
         return result.returncode == 0
-    except Exception:
+    except (OSError, subprocess.SubprocessError):
         return False
 
 
@@ -44,19 +60,28 @@ def get_python_command():
     return []
 
 
-def install_dependency(package, index_url=None, upgrade=False, log_callback=None):
+def _drain_output(process, log_callback, timeout):
+    if log_callback:
+        for line in process.stdout:
+            line = line.strip()
+            if line:
+                log_callback(line)
+        return process.wait()
+    process.communicate(timeout=timeout)
+    return process.returncode
+
+
+def install_dependency(package, index_url=None, timeout=PACKAGE_INSTALL_TIMEOUT, log_callback=None):
+    python_command = get_python_command()
+    if not python_command:
+        return False
+    command = python_command + ["-m", "pip", "install"]
+    if index_url:
+        command += ["--index-url", index_url]
+    command += package.split()
     try:
-        python_command = get_python_command()
-        if not python_command:
-            return False
-        cmd = python_command + ["-m", "pip", "install"]
-        if upgrade:
-            cmd.append("--upgrade")
-        cmd.extend(package.split())
-        if index_url:
-            cmd.extend(["--index-url", index_url])
-        proc = subprocess.Popen(
-            cmd,
+        process = subprocess.Popen(
+            command,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
@@ -64,38 +89,43 @@ def install_dependency(package, index_url=None, upgrade=False, log_callback=None
             errors="replace",
             creationflags=_no_window_flags(),
         )
-        if log_callback:
-            for line in proc.stdout:
-                line = line.strip()
-                if line:
-                    log_callback(line)
-        else:
-            proc.communicate()
-        rc = proc.wait()
-        importlib.invalidate_caches()
-        return rc == 0
-    except Exception:
+    except OSError:
         return False
-
-def uninstall_package(package):
     try:
-        python_command = get_python_command()
-        if not python_command:
-            return False
-        subprocess.check_call(
+        return _drain_output(process, log_callback, timeout) == 0
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait()
+        if log_callback:
+            log_callback("pip: timed out")
+        return False
+    finally:
+        if process.stdout:
+            process.stdout.close()
+        importlib.invalidate_caches()
+
+
+def uninstall_package(package, timeout=PACKAGE_INSTALL_TIMEOUT):
+    python_command = get_python_command()
+    if not python_command:
+        return False
+    try:
+        subprocess.run(
             python_command + ["-m", "pip", "uninstall", "-y", package],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
+            timeout=timeout,
             creationflags=_no_window_flags(),
         )
-        importlib.invalidate_caches()
-        return True
-    except Exception:
+    except (OSError, subprocess.SubprocessError):
         return False
+    importlib.invalidate_caches()
+    return True
+
 
 def ensure_gui_dependency():
     try:
-        __import__("PyQt6")
+        importlib.import_module("PyQt6")
     except ImportError:
         print("PyQt6 is required. Attempting to install...")
         if install_dependency("PyQt6"):
@@ -104,11 +134,41 @@ def ensure_gui_dependency():
             print("Failed to install PyQt6. Please run: pip install PyQt6")
         sys.exit(1)
 
-def check_transcription_deps():
+
+def find_missing_modules(modules=TRANSCRIPTION_MODULES):
     missing = []
-    for mod in ["whisper", "torch"]:
+    for name in modules:
         try:
-            importlib.import_module(mod)
-        except ImportError:
-            missing.append(mod)
+            if importlib.util.find_spec(name) is None:
+                missing.append(name)
+        except (ImportError, ValueError):
+            missing.append(name)
     return missing
+
+
+def check_transcription_deps():
+    return find_missing_modules()
+
+
+def module_distribution_name(module_name):
+    return MODULE_DISTRIBUTIONS.get(module_name, module_name)
+
+
+def module_imports_in_subprocess(module_name):
+    python_command = get_python_command()
+    if not python_command:
+        return False
+    try:
+        result = subprocess.run(
+            python_command + ["-c", "import %s" % module_name],
+            capture_output=True,
+            timeout=IMPORT_PROBE_TIMEOUT,
+            creationflags=_no_window_flags(),
+        )
+        return result.returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
+def probe_modules(modules=TRANSCRIPTION_MODULES):
+    return {name: module_imports_in_subprocess(name) for name in modules}
