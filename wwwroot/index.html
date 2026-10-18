@@ -1,0 +1,509 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; font-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'">
+    <title>Whisper Speech Recognition</title>
+    <link rel="icon" href="assets/app.svg" type="image/svg+xml">
+    <link rel="stylesheet" href="assets/app.css">
+  </head>
+  <body>
+    <div class="app-frame">
+      <header class="app-header glass">
+        <div class="brand">
+          <span class="brand-mark"><img src="assets/app.svg" alt=""></span>
+          <div class="brand-copy">
+            <div class="brand-title" data-i18n="app.title">Whisper GUI</div>
+            <div class="brand-subtitle" data-i18n="app.subtitle">Local speech recognition</div>
+          </div>
+        </div>
+        <div class="header-actions">
+          <span id="headerStatus" class="status-pill" data-i18n="status.loading">Loading</span>
+          <label class="header-select">
+            <i data-lucide="languages" aria-hidden="true"></i>
+            <select id="uiLanguageSelect" class="control">
+              <option value="system" data-i18n="language.system">Follow system</option>
+              <option value="zh-CN" data-i18n="language.zh">Chinese</option>
+              <option value="en-US" data-i18n="language.en">English</option>
+            </select>
+          </label>
+          <label class="header-select">
+            <i data-lucide="sun-moon" aria-hidden="true"></i>
+            <select id="uiThemeSelect" class="control">
+              <option value="auto" data-i18n="theme.auto">Follow system</option>
+              <option value="light" data-i18n="theme.light">Light</option>
+              <option value="dark" data-i18n="theme.dark">Dark</option>
+            </select>
+          </label>
+        </div>
+      </header>
+
+      <div class="shell">
+        <aside class="sidebar glass">
+          <nav class="nav-list" aria-label="Primary">
+            <button class="nav-button active" type="button" data-view="transcribe">
+              <i data-lucide="audio-lines" aria-hidden="true"></i>
+              <span data-i18n="nav.transcribe">Transcribe</span>
+            </button>
+            <button class="nav-button" type="button" data-view="environment">
+              <i data-lucide="package-check" aria-hidden="true"></i>
+              <span data-i18n="nav.environment">Environment</span>
+            </button>
+            <button class="nav-button" type="button" data-view="settings">
+              <i data-lucide="settings-2" aria-hidden="true"></i>
+              <span data-i18n="nav.settings">Settings</span>
+            </button>
+          </nav>
+          <div class="sidebar-status">
+            <span data-i18n="sidebar.runtime">Local runtime</span>
+            <strong id="sidebarRuntime">-</strong>
+            <span data-i18n="sidebar.cache">Model cache</span>
+            <strong id="sidebarCache">-</strong>
+            <button id="aboutButton" class="button ghost sidebar-about" type="button" data-i18n="about.button">About</button>
+          </div>
+        </aside>
+
+        <main class="main">
+          <section id="view-transcribe" class="view active" data-view-panel="transcribe">
+            <div class="view-heading">
+              <div>
+                <h1 data-i18n="transcribe.title">Transcribe audio</h1>
+                <p data-i18n="transcribe.copy">Run batch speech recognition locally and save each transcript separately.</p>
+              </div>
+              <div class="button-row">
+                <button id="openLogsButton" class="button secondary" type="button">
+                  <i data-lucide="folder-open" aria-hidden="true"></i>
+                  <span data-i18n="action.openLog">Open log</span>
+                </button>
+              </div>
+            </div>
+
+            <div class="summary-strip">
+              <div class="summary-item">
+                <span class="summary-label" data-i18n="summary.device">Device</span>
+                <strong id="summaryDevice" class="summary-value">Auto</strong>
+              </div>
+              <div class="summary-item">
+                <span class="summary-label" data-i18n="summary.model">Model</span>
+                <strong id="summaryModel" class="summary-value">Tiny</strong>
+              </div>
+              <div class="summary-item">
+                <span class="summary-label" data-i18n="summary.ffmpeg">ffmpeg</span>
+                <strong id="summaryFfmpeg" class="summary-value">-</strong>
+              </div>
+              <div class="summary-item">
+                <span class="summary-label" data-i18n="summary.files">Files</span>
+                <strong id="summaryFiles" class="summary-value">0</strong>
+              </div>
+            </div>
+
+            <div class="workspace-grid">
+              <div class="stack">
+                <section class="panel glass">
+                  <div class="panel-header">
+                    <div class="panel-title">
+                      <h2 data-i18n="form.title">Transcription setup</h2>
+                      <p data-i18n="form.copy">Choose the runtime, model, source files, and output folder.</p>
+                    </div>
+                    <span id="taskStatus" class="status-pill" data-i18n="task.idle">Ready</span>
+                  </div>
+                  <div class="panel-body stack">
+                    <div class="form-grid three">
+                      <div class="field">
+                        <label for="deviceSelect" data-i18n="field.device">Device</label>
+                        <select id="deviceSelect" class="control">
+                          <option value="auto" data-i18n="option.auto">Auto</option>
+                          <option value="cpu" data-i18n="option.cpu">CPU</option>
+                          <option value="gpu" data-i18n="option.gpu">GPU</option>
+                        </select>
+                      </div>
+                      <div class="field">
+                        <label for="modelSelect" data-i18n="field.model">Model</label>
+                        <select id="modelSelect" class="control"></select>
+                      </div>
+                      <div class="field">
+                        <label for="languageSelect" data-i18n="field.language">Recognition language</label>
+                        <select id="languageSelect" class="control">
+                          <option value="auto" data-i18n="option.detect">Auto detect</option>
+                          <option value="zh" data-i18n="option.zh">Chinese</option>
+                          <option value="en" data-i18n="option.en">English</option>
+                          <option value="ja" data-i18n="option.ja">Japanese</option>
+                          <option value="ko" data-i18n="option.ko">Korean</option>
+                          <option value="fr" data-i18n="option.fr">French</option>
+                          <option value="de" data-i18n="option.de">German</option>
+                          <option value="es" data-i18n="option.es">Spanish</option>
+                          <option value="ru" data-i18n="option.ru">Russian</option>
+                        </select>
+                      </div>
+                    </div>
+
+                    <div class="field">
+                      <span class="field-label" data-i18n="field.audioFiles">Audio files</span>
+                      <div class="input-group">
+                        <div class="input-shell">
+                          <i data-lucide="file-audio" aria-hidden="true"></i>
+                          <input id="fileSummary" type="text" readonly value="" data-i18n-placeholder="placeholder.noFiles" placeholder="No files selected">
+                        </div>
+                        <button id="browseFilesButton" class="button secondary" type="button">
+                          <i data-lucide="folder-search" aria-hidden="true"></i>
+                          <span data-i18n="action.browse">Browse</span>
+                        </button>
+                      </div>
+                    </div>
+
+                    <div class="field">
+                      <label for="outputDirectory" data-i18n="field.output">Output directory</label>
+                      <div class="input-group">
+                        <div class="input-shell">
+                          <i data-lucide="folder-output" aria-hidden="true"></i>
+                          <input id="outputDirectory" type="text" value="">
+                        </div>
+                        <button id="browseOutputButton" class="button secondary" type="button">
+                          <i data-lucide="folder-open" aria-hidden="true"></i>
+                          <span data-i18n="action.choose">Choose</span>
+                        </button>
+                      </div>
+                    </div>
+
+                    <div id="ffmpegNotice" class="notice" hidden>
+                      <i data-lucide="triangle-alert" aria-hidden="true"></i>
+                      <span data-i18n="notice.ffmpeg">ffmpeg was not found. WAV files still work.</span>
+                    </div>
+
+                    <div class="button-row">
+                      <button id="recommendButton" class="button secondary" type="button">
+                        <i data-lucide="sparkles" aria-hidden="true"></i>
+                        <span data-i18n="action.recommend">Recommend</span>
+                      </button>
+                      <button id="installModelButton" class="button secondary" type="button">
+                        <i data-lucide="download" aria-hidden="true"></i>
+                        <span data-i18n="action.downloadModel">Download model</span>
+                      </button>
+                      <button id="startButton" class="button primary" type="button">
+                        <i data-lucide="play" aria-hidden="true"></i>
+                        <span data-i18n="action.start">Start transcription</span>
+                      </button>
+                      <button id="stopButton" class="button danger" type="button" disabled>
+                        <i data-lucide="square" aria-hidden="true"></i>
+                        <span data-i18n="action.stop">Stop</span>
+                      </button>
+                    </div>
+
+                    <div id="transcriptionProgress" class="progress-wrap">
+                      <div class="progress-label">
+                        <span id="progressMessage">-</span>
+                        <span id="progressPercent">0%</span>
+                      </div>
+                      <div class="progress-track"><div id="progressFill" class="progress-fill"></div></div>
+                    </div>
+                  </div>
+                </section>
+              </div>
+
+              <div class="stack">
+                <section class="panel glass">
+                  <div class="panel-header">
+                    <div class="panel-title">
+                      <h2 data-i18n="results.title">Transcripts</h2>
+                      <p data-i18n="results.copy">Completed outputs from this session.</p>
+                    </div>
+                    <button id="clearResultsButton" class="button ghost icon-only" type="button" data-i18n-title="action.clear" title="Clear">
+                      <i data-lucide="trash-2" aria-hidden="true"></i>
+                      <span class="sr-only" data-i18n="action.clear">Clear</span>
+                    </button>
+                  </div>
+                  <div class="panel-body">
+                    <div id="resultList" class="result-list"></div>
+                    <div id="resultEmpty" class="empty-state" data-i18n="results.empty">No transcripts yet.</div>
+                  </div>
+                </section>
+
+                <section class="panel glass">
+                  <div class="panel-header">
+                    <div class="panel-title">
+                      <h2 data-i18n="logs.title">Activity log</h2>
+                      <p data-i18n="logs.copy">Runtime messages appear here.</p>
+                    </div>
+                    <button id="clearLogsButton" class="button ghost icon-only" type="button" data-i18n-title="action.clear" title="Clear">
+                      <i data-lucide="trash-2" aria-hidden="true"></i>
+                      <span class="sr-only" data-i18n="action.clear">Clear</span>
+                    </button>
+                  </div>
+                  <div class="panel-body">
+                    <div id="logList" class="log-list"></div>
+                    <div id="logEmpty" class="empty-state" data-i18n="logs.empty">No activity yet.</div>
+                  </div>
+                </section>
+              </div>
+            </div>
+          </section>
+
+          <section id="view-environment" class="view" data-view-panel="environment">
+            <div class="view-heading">
+              <div>
+                <h1 data-i18n="environment.title">Runtime environment</h1>
+                <p data-i18n="environment.copy">Inspect local dependencies, hardware acceleration, and model files.</p>
+              </div>
+              <button id="refreshEnvironmentButton" class="button secondary" type="button">
+                <i data-lucide="refresh-cw" aria-hidden="true"></i>
+                <span data-i18n="action.refresh">Refresh</span>
+              </button>
+            </div>
+
+            <div class="stack">
+              <section class="panel glass">
+                <div class="panel-header">
+                  <div class="panel-title">
+                    <h2 data-i18n="hardware.title">Hardware</h2>
+                    <p data-i18n="hardware.copy">Detected acceleration and decoding support.</p>
+                  </div>
+                  <span id="hardwareStatus" class="status-pill" data-i18n="status.loading">Loading</span>
+                </div>
+                <div class="panel-body">
+                  <div class="summary-strip">
+                    <div class="summary-item">
+                      <span class="summary-label" data-i18n="hardware.gpu">GPU</span>
+                      <strong id="hardwareGpu" class="summary-value">-</strong>
+                    </div>
+                    <div class="summary-item">
+                      <span class="summary-label" data-i18n="hardware.vram">VRAM</span>
+                      <strong id="hardwareVram" class="summary-value">-</strong>
+                    </div>
+                    <div class="summary-item">
+                      <span class="summary-label" data-i18n="hardware.ffmpeg">ffmpeg</span>
+                      <strong id="hardwareFfmpeg" class="summary-value">-</strong>
+                    </div>
+                    <div class="summary-item">
+                      <span class="summary-label" data-i18n="hardware.python">Python</span>
+                      <strong id="hardwarePython" class="summary-value">-</strong>
+                    </div>
+                  </div>
+                </div>
+              </section>
+
+              <section class="panel glass">
+                <div class="panel-header">
+                  <div class="panel-title">
+                    <h2 data-i18n="dependencies.title">Local dependencies</h2>
+                    <p data-i18n="dependencies.copy">Install into the application-local environment.</p>
+                  </div>
+                  <span id="dependencyStatus" class="status-pill" data-i18n="status.loading">Loading</span>
+                </div>
+                <div class="panel-body stack">
+                  <div class="button-row">
+                    <button id="installCpuButton" class="button primary" type="button">
+                      <i data-lucide="cpu" aria-hidden="true"></i>
+                      <span data-i18n="action.installCpu">Install CPU</span>
+                    </button>
+                    <button id="installGpuButton" class="button secondary" type="button">
+                      <i data-lucide="zap" aria-hidden="true"></i>
+                      <span data-i18n="action.installGpu">Install GPU</span>
+                    </button>
+                    <button id="cancelTaskButton" class="button danger" type="button" disabled>
+                      <i data-lucide="circle-stop" aria-hidden="true"></i>
+                      <span data-i18n="action.cancel">Cancel</span>
+                    </button>
+                  </div>
+                  <div id="installProgress" class="progress-wrap">
+                    <div class="progress-label">
+                      <span id="installProgressMessage">-</span>
+                      <span id="installProgressPercent">0%</span>
+                    </div>
+                    <div class="progress-track"><div id="installProgressFill" class="progress-fill"></div></div>
+                  </div>
+                </div>
+              </section>
+
+              <section class="panel glass">
+                <div class="panel-header">
+                  <div class="panel-title">
+                    <h2 data-i18n="models.title">Whisper models</h2>
+                    <p data-i18n="models.copy">Official downloads with local size checks.</p>
+                  </div>
+                </div>
+                <div class="panel-body">
+                  <div id="modelList" class="model-grid"></div>
+                </div>
+              </section>
+            </div>
+          </section>
+
+          <section id="view-settings" class="view" data-view-panel="settings">
+            <div class="view-heading">
+              <div>
+                <h1 data-i18n="settings.title">Settings</h1>
+                <p data-i18n="settings.copy">Preferences and imported service profiles are written only after an explicit save.</p>
+              </div>
+            </div>
+
+            <div class="stack">
+              <div id="settingsNotice" class="notice">
+                <i data-lucide="file-question" aria-hidden="true"></i>
+                <span id="settingsNoticeText" data-i18n="settings.notCreated">No settings file has been created.</span>
+              </div>
+
+              <section class="panel glass">
+                <div class="panel-header">
+                  <div class="panel-title">
+                    <h2 data-i18n="settings.preferences">Preferences</h2>
+                    <p data-i18n="settings.preferencesCopy">Language, theme, device, and output folder.</p>
+                  </div>
+                </div>
+                <div class="panel-body stack">
+                  <div class="form-grid">
+                    <div class="field">
+                      <label for="settingsLanguage" data-i18n="settings.language">Interface language</label>
+                      <select id="settingsLanguage" class="control">
+                        <option value="system" data-i18n="language.system">Follow system</option>
+                        <option value="zh-CN" data-i18n="language.zh">Chinese</option>
+                        <option value="en-US" data-i18n="language.en">English</option>
+                      </select>
+                    </div>
+                    <div class="field">
+                      <label for="settingsTheme" data-i18n="settings.theme">Theme</label>
+                      <select id="settingsTheme" class="control">
+                        <option value="auto" data-i18n="theme.auto">Follow system</option>
+                        <option value="light" data-i18n="theme.light">Light</option>
+                        <option value="dark" data-i18n="theme.dark">Dark</option>
+                      </select>
+                    </div>
+                    <div class="field">
+                      <label for="settingsDevice" data-i18n="field.device">Device</label>
+                      <select id="settingsDevice" class="control">
+                        <option value="auto" data-i18n="option.auto">Auto</option>
+                        <option value="cpu" data-i18n="option.cpu">CPU</option>
+                        <option value="gpu" data-i18n="option.gpu">GPU</option>
+                      </select>
+                    </div>
+                    <div class="field">
+                      <label for="settingsOutput" data-i18n="field.output">Output directory</label>
+                      <input id="settingsOutput" class="control" type="text">
+                    </div>
+                  </div>
+                  <div class="button-row">
+                    <button id="saveSettingsButton" class="button primary" type="button">
+                      <i data-lucide="save" aria-hidden="true"></i>
+                      <span data-i18n="action.save">Save settings</span>
+                    </button>
+                    <button id="resetSettingsButton" class="button danger" type="button">
+                      <i data-lucide="rotate-ccw" aria-hidden="true"></i>
+                      <span data-i18n="action.reset">Reset</span>
+                    </button>
+                  </div>
+                </div>
+              </section>
+
+              <section class="panel glass">
+                <div class="panel-header">
+                  <div class="panel-title">
+                    <h2 data-i18n="services.title">Imported services</h2>
+                    <p data-i18n="services.copy">Credentials are encrypted for the current Windows user.</p>
+                  </div>
+                  <button id="openImportButton" class="button secondary" type="button">
+                    <i data-lucide="file-plus-2" aria-hidden="true"></i>
+                    <span data-i18n="action.import">Import</span>
+                  </button>
+                </div>
+                <div class="panel-body">
+                  <div id="serviceList" class="service-list"></div>
+                  <div id="serviceEmpty" class="empty-state" data-i18n="services.empty">No service profiles imported.</div>
+                </div>
+              </section>
+            </div>
+          </section>
+        </main>
+      </div>
+    </div>
+
+    <div id="importOverlay" class="overlay" role="dialog" aria-modal="true" aria-labelledby="importTitle">
+      <div class="modal">
+        <div class="modal-header">
+          <h2 id="importTitle" data-i18n="import.title">Import service profile</h2>
+          <button class="button ghost icon-only" type="button" data-close-overlay="importOverlay" data-i18n-title="action.close" title="Close">
+            <i data-lucide="x" aria-hidden="true"></i>
+            <span class="sr-only" data-i18n="action.close">Close</span>
+          </button>
+        </div>
+        <form id="importForm" class="modal-body">
+          <div class="field">
+            <label for="serviceName" data-i18n="import.name">Name</label>
+            <input id="serviceName" class="control" type="text" maxlength="80" required autocomplete="off">
+          </div>
+          <div class="field">
+            <label for="serviceAddress" data-i18n="import.address">Address</label>
+            <input id="serviceAddress" class="control" type="url" maxlength="2048" required inputmode="url" autocomplete="url" placeholder="https://">
+            <span class="field-hint" data-i18n="import.addressHint">HTTPS on port 443 only. Local and private networks are blocked.</span>
+          </div>
+          <div class="field">
+            <label for="serviceType" data-i18n="import.type">Type</label>
+            <select id="serviceType" class="control">
+              <option value="http" data-i18n="import.typeHttp">HTTP service</option>
+              <option value="api" data-i18n="import.typeApi">API endpoint</option>
+              <option value="local" data-i18n="import.typeLocal">Named local profile</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="serviceCredential" data-i18n="import.credential">Credential content</label>
+            <input id="serviceCredential" class="control" type="password" maxlength="8192" autocomplete="new-password">
+            <span class="field-hint" data-i18n="import.credentialHint">Stored with Windows DPAPI and never returned to the interface.</span>
+          </div>
+          <div class="field">
+            <label for="serviceUserId" data-i18n="import.userId">User ID</label>
+            <input id="serviceUserId" class="control" type="text" maxlength="128" autocomplete="off">
+          </div>
+          <div class="button-row">
+            <button class="button secondary" type="button" data-close-overlay="importOverlay">
+              <span data-i18n="action.cancel">Cancel</span>
+            </button>
+            <button class="button primary" type="submit">
+              <i data-lucide="check" aria-hidden="true"></i>
+              <span data-i18n="action.import">Import</span>
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
+
+    <div id="confirmOverlay" class="overlay" role="dialog" aria-modal="true" aria-labelledby="confirmTitle">
+      <div class="modal small">
+        <div class="modal-header">
+          <h2 id="confirmTitle" data-i18n="confirm.title">Confirm</h2>
+        </div>
+        <div class="modal-body">
+          <div id="confirmMessage" class="notice"></div>
+        </div>
+        <div class="modal-footer">
+          <button id="confirmCancelButton" class="button secondary" type="button" data-i18n="action.cancel">Cancel</button>
+          <button id="confirmAcceptButton" class="button primary" type="button" data-i18n="action.confirm">Confirm</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="aboutOverlay" class="overlay" role="dialog" aria-modal="true" aria-labelledby="aboutTitle">
+      <div class="modal small">
+        <div class="modal-header">
+          <h2 id="aboutTitle" data-i18n="about.title">About Whisper GUI</h2>
+          <button class="button ghost icon-only" type="button" data-close-overlay="aboutOverlay" data-i18n-title="action.close" title="Close"><i data-lucide="x"></i></button>
+        </div>
+        <div class="modal-body">
+          <div style="display:grid;gap:0">
+            <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:16px;padding:10px 0;border-bottom:1px solid rgba(148,163,184,.25)"><span data-i18n="about.version">Version</span><strong id="aboutVersion">—</strong></div>
+            <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:16px;padding:10px 0;border-bottom:1px solid rgba(148,163,184,.25)"><span data-i18n="about.runtime">Runtime Rust</span><strong id="aboutRuntime">—</strong></div>
+            <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:16px;padding:10px 0;border-bottom:1px solid rgba(148,163,184,.25)"><span data-i18n="about.installPath">Install path</span><code id="aboutInstallPath" style="text-align:right;word-break:break-all;font-size:12px">—</code></div>
+            <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:16px;padding:10px 0"><span data-i18n="about.settingsPath">Configuration file</span><code id="aboutSettingsPath" style="text-align:right;word-break:break-all;font-size:12px">—</code></div>
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button class="button primary" type="button" data-close-overlay="aboutOverlay" data-i18n="action.close">Close</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="toastRegion" class="toast-region" aria-live="polite"></div>
+
+    <script src="assets/lucide.min.js"></script>
+    <script src="assets/i18n.js"></script>
+    <script src="assets/app.js"></script>
+  </body>
+</html>

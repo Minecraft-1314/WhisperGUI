@@ -1,0 +1,51 @@
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
+     xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui">
+  <Package Name="Whisper GUI"
+           Manufacturer="Minecraft-1314"
+           Version="$(var.ProductVersion)"
+           UpgradeCode="{3A7B9B2B-8C7C-4B10-9F6A-2E6A1E4A6D42}"
+           Scope="perMachine">
+    <MajorUpgrade DowngradeErrorMessage="A newer version of Whisper GUI is already installed." />
+    <MediaTemplate EmbedCab="yes" CompressionLevel="high" />
+    <Icon Id="AppIcon" SourceFile="$(var.AppSource)\app.ico" />
+    <Property Id="ARPPRODUCTICON" Value="AppIcon" />
+    <Property Id="ARPDESCRIPTION" Value="Whisper GUI" />
+    <Feature Id="MainFeature" Title="Whisper GUI" Level="1">
+      <ComponentGroupRef Id="ApplicationFiles" />
+      <ComponentRef Id="StartMenuShortcut" />
+    </Feature>
+    <ui:WixUI Id="WixUI_Minimal" />
+  </Package>
+
+  <Fragment>
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Directory Id="INSTALLFOLDER" Name="WhisperGUI" />
+    </StandardDirectory>
+  </Fragment>
+
+  <Fragment>
+    <ComponentGroup Id="ApplicationFiles" Directory="INSTALLFOLDER">
+      <Files Include="$(var.AppSource)\**" />
+    </ComponentGroup>
+  </Fragment>
+
+  <Fragment>
+    <StandardDirectory Id="ProgramMenuFolder">
+      <Component Id="StartMenuShortcut" Guid="{8A0A786F-AE1C-47D8-BB4F-E9A57B3E7F92}">
+        <Shortcut Id="StartMenuShortcutLink"
+                  Name="Whisper GUI"
+                  Target="[INSTALLFOLDER]WhisperGUI.exe"
+                  WorkingDirectory="INSTALLFOLDER"
+                  Icon="AppIcon"
+                  IconIndex="0" />
+        <RemoveFolder Id="RemoveStartMenuFolder" On="uninstall" />
+        <RegistryValue Root="HKCU"
+                       Key="Software\WhisperGUI\Shortcuts"
+                       Name="StartMenu"
+                       Type="string"
+                       Value="[INSTALLFOLDER]"
+                       KeyPath="yes" />
+      </Component>
+    </StandardDirectory>
+  </Fragment>
+</Wix>

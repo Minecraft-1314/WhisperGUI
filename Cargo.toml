@@ -1,0 +1,47 @@
+[package]
+name = "whispergui"
+version = "0.0.1"
+edition = "2021"
+rust-version = "1.80"
+description = "Whisper GUI desktop shell"
+license = "MIT"
+
+[lib]
+name = "whispergui"
+path = "src/lib.rs"
+
+[[bin]]
+name = "WhisperGUI"
+path = "src/main.rs"
+
+[[bin]]
+name = "uninstall"
+path = "src/bin/uninstall.rs"
+
+[dependencies]
+tao = "0.30"
+wry = "0.47"
+rfd = "0.15"
+regex = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+ureq = { version = "2", features = ["json"] }
+sha2 = "0.10"
+base64 = "0.22"
+image = { version = "0.25", default-features = false, features = ["ico"] }
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Cryptography",
+    "Win32_System_Com",
+    "Win32_System_Registry",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_Storage_FileSystem",
+] }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+panic = "unwind"

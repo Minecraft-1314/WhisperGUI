@@ -1,0 +1,44 @@
+{
+  "models": [
+    {
+      "id": "tiny",
+      "label": "Tiny",
+      "fileName": "tiny.pt",
+      "sizeBytes": 75572083,
+      "sha256": "65147644a518d12f04e32d6f3b26facc3f8dd46e5390956a9424a650c0ce22b9",
+      "url": "https://openaipublic.azureedge.net/main/whisper/models/65147644a518d12f04e32d6f3b26facc3f8dd46e5390956a9424a650c0ce22b9/tiny.pt"
+    },
+    {
+      "id": "base",
+      "label": "Base",
+      "fileName": "base.pt",
+      "sizeBytes": 145262807,
+      "sha256": "ed3a0b6b1c0edf879ad9b11b1af5a0e6ab5db9205f891f668f8b0e6c6326e34e",
+      "url": "https://openaipublic.azureedge.net/main/whisper/models/ed3a0b6b1c0edf879ad9b11b1af5a0e6ab5db9205f891f668f8b0e6c6326e34e/base.pt"
+    },
+    {
+      "id": "small",
+      "label": "Small",
+      "fileName": "small.pt",
+      "sizeBytes": 483617219,
+      "sha256": "9ecf779972d90ba49c06d968637d720dd632c55bbf19d441fb42bf17a411e794",
+      "url": "https://openaipublic.azureedge.net/main/whisper/models/9ecf779972d90ba49c06d968637d720dd632c55bbf19d441fb42bf17a411e794/small.pt"
+    },
+    {
+      "id": "medium",
+      "label": "Medium",
+      "fileName": "medium.pt",
+      "sizeBytes": 1528008539,
+      "sha256": "345ae4da62f9b3d59415adc60127b97c714f32e89e936602e85993674d08dcb1",
+      "url": "https://openaipublic.azureedge.net/main/whisper/models/345ae4da62f9b3d59415adc60127b97c714f32e89e936602e85993674d08dcb1/medium.pt"
+    },
+    {
+      "id": "large",
+      "label": "Large",
+      "fileName": "large-v3.pt",
+      "sizeBytes": 3087371615,
+      "sha256": "e5b1a55b89c1367dacf97e3e19bfd829a01529dbfdeefa8caeb59b3f1b81dadb",
+      "url": "https://openaipublic.azureedge.net/main/whisper/models/e5b1a55b89c1367dacf97e3e19bfd829a01529dbfdeefa8caeb59b3f1b81dadb/large-v3.pt"
+    }
+  ]
+}
